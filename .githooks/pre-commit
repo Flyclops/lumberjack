@@ -1,2 +1,2 @@
 echo "Running all tests\n"
-go test ./...
+go test ./... -count=1
