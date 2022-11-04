@@ -107,6 +107,10 @@ type Logger struct {
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
 
+	// BackupDirectory set this to specify the location of backup files
+	// defaults to the directory where the file lives
+	BackupDirectory string `json:"backupDirectory" yaml:"backupdirectory`
+
 	size int64
 	file *os.File
 	mu   sync.Mutex
@@ -204,11 +208,19 @@ func (l *Logger) rotate() error {
 }
 
 // openNew opens a new log file for writing, moving any old log file out of the
-// way.  This methods assumes the file has already been closed.
+// way. If a backup directory is specified it will try to create the directory.
+// This methods assumes the file has already been closed.
 func (l *Logger) openNew() error {
 	err := os.MkdirAll(l.dir(), 0755)
 	if err != nil {
 		return fmt.Errorf("can't make directories for new logfile: %s", err)
+	}
+
+	if l.BackupDirectory != "" {
+		err = os.MkdirAll(l.backupdir(), 0755)
+		if err != nil {
+			return fmt.Errorf("can't make backup directories for backup file: %s", err)
+		}
 	}
 
 	name := l.filename()
@@ -218,7 +230,7 @@ func (l *Logger) openNew() error {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
 		// move the existing file
-		newname := backupName(name, l.LocalTime)
+		newname := backupName(l.backupdir(), name, l.LocalTime)
 		if err := os.Rename(name, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
@@ -244,8 +256,7 @@ func (l *Logger) openNew() error {
 // backupName creates a new filename from the given name, inserting a timestamp
 // between the filename and the extension, using the local time if requested
 // (otherwise UTC).
-func backupName(name string, local bool) string {
-	dir := filepath.Dir(name)
+func backupName(dir, name string, local bool) string {
 	filename := filepath.Base(name)
 	ext := filepath.Ext(filename)
 	prefix := filename[:len(filename)-len(ext)]
@@ -357,13 +368,13 @@ func (l *Logger) millRunOnce() error {
 	}
 
 	for _, f := range remove {
-		errRemove := os.Remove(filepath.Join(l.dir(), f.Name()))
+		errRemove := os.Remove(filepath.Join(l.backupdir(), f.Name()))
 		if err == nil && errRemove != nil {
 			err = errRemove
 		}
 	}
 	for _, f := range compress {
-		fn := filepath.Join(l.dir(), f.Name())
+		fn := filepath.Join(l.backupdir(), f.Name())
 		errCompress := compressLogFile(fn, fn+compressSuffix)
 		if err == nil && errCompress != nil {
 			err = errCompress
@@ -398,7 +409,7 @@ func (l *Logger) mill() {
 // oldLogFiles returns the list of backup log files stored in the same
 // directory as the current log file, sorted by ModTime
 func (l *Logger) oldLogFiles() ([]logInfo, error) {
-	files, err := ioutil.ReadDir(l.dir())
+	files, err := ioutil.ReadDir(l.backupdir())
 	if err != nil {
 		return nil, fmt.Errorf("can't read log file directory: %s", err)
 	}
@@ -451,6 +462,15 @@ func (l *Logger) max() int64 {
 
 // dir returns the directory for the current filename.
 func (l *Logger) dir() string {
+	return filepath.Dir(l.filename())
+}
+
+// backupdir returns the directory where backups are written to
+func (l *Logger) backupdir() string {
+	if l.BackupDirectory != "" {
+		return l.BackupDirectory
+	}
+
 	return filepath.Dir(l.filename())
 }
 

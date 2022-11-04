@@ -112,6 +112,31 @@ func TestMakeLogDir(t *testing.T) {
 	fileCount(dir, 1, t)
 }
 
+func TestMakeLogDirAndBackupDir(t *testing.T) {
+	currentTime = fakeTime
+	dir := time.Now().Format("TestMakeLogDir" + backupTimeFormat)
+	dir = filepath.Join(os.TempDir(), dir)
+
+	dir2 := time.Now().Format("TestMakeLogDir2" + backupTimeFormat)
+	dir2 = filepath.Join(os.TempDir(), dir2)
+
+	defer os.RemoveAll(dir2)
+
+	filename := logFile(dir)
+	l := &Logger{
+		Filename:        filename,
+		BackupDirectory: dir2,
+	}
+	defer l.Close()
+	b := []byte("boo!")
+	n, err := l.Write(b)
+	isNil(err, t)
+	equals(len(b), n, t)
+	exists(dir2, t)
+	existsWithContent(logFile(dir), b, t)
+	fileCount(dir, 1, t)
+}
+
 func TestDefaultFilename(t *testing.T) {
 	currentTime = fakeTime
 	dir := os.TempDir()
@@ -194,6 +219,50 @@ func TestFirstWriteRotate(t *testing.T) {
 	existsWithContent(backupFile(dir), start, t)
 
 	fileCount(dir, 2, t)
+}
+
+func TestBackupDir(t *testing.T) {
+	currentTime = fakeTime
+	megabyte = 1
+
+	dir := makeTempDir("TestBackupDir", t)
+	fmt.Print(dir)
+	defer os.RemoveAll(dir)
+
+	dir2 := makeTempDir("TestBackupDirBackup", t)
+	defer os.RemoveAll(dir2)
+
+	filename := logFile(dir)
+	l := &Logger{
+		Filename:        filename,
+		BackupDirectory: dir2,
+		MaxSize:         10,
+	}
+	defer l.Close()
+
+	b := []byte("boo!")
+	n, err := l.Write(b)
+	isNil(err, t)
+	equals(len(b), n, t)
+
+	existsWithContent(filename, b, t)
+	fileCount(dir, 1, t)
+
+	newFakeTime()
+
+	b2 := []byte("foooooo!")
+	n, err = l.Write(b2)
+	isNil(err, t)
+	equals(len(b2), n, t)
+
+	// the old logfile should be moved aside and the main logfile should have
+	// only the last write in it.
+	existsWithContent(filename, b2, t)
+
+	// the backup file will use the current fake time and have the old contents.
+	existsWithContent(backupFile(dir2), b, t)
+	fileCount(dir, 1, t)
+	fileCount(dir2, 1, t)
 }
 
 func TestMaxBackups(t *testing.T) {
@@ -377,6 +446,66 @@ func TestCleanupExistingBackups(t *testing.T) {
 	fileCount(dir, 2, t)
 }
 
+func TestCleanupExistingBackupsWithBackupDir(t *testing.T) {
+	// test that if we start with more backup files than we're supposed to have
+	// in total, that extra ones get cleaned up when we rotate.
+
+	currentTime = fakeTime
+	megabyte = 1
+
+	dir := makeTempDir("TestCleanupExistingBackups", t)
+	defer os.RemoveAll(dir)
+
+	dir2 := makeTempDir("TestCleanupExistingBackups2", t)
+	defer os.RemoveAll(dir2)
+	// make 3 backup files
+
+	data := []byte("data")
+	backup := backupFile(dir2)
+	err := ioutil.WriteFile(backup, data, 0644)
+	isNil(err, t)
+
+	newFakeTime()
+
+	backup = backupFile(dir2)
+	err = ioutil.WriteFile(backup+compressSuffix, data, 0644)
+	isNil(err, t)
+
+	newFakeTime()
+
+	backup = backupFile(dir2)
+	err = ioutil.WriteFile(backup, data, 0644)
+	isNil(err, t)
+
+	// now create a primary log file with some data
+	filename := logFile(dir)
+	err = ioutil.WriteFile(filename, data, 0644)
+	isNil(err, t)
+
+	l := &Logger{
+		Filename:        filename,
+		BackupDirectory: dir2,
+		MaxSize:         10,
+		MaxBackups:      1,
+	}
+	defer l.Close()
+
+	newFakeTime()
+
+	b2 := []byte("foooooo!")
+	n, err := l.Write(b2)
+	isNil(err, t)
+	equals(len(b2), n, t)
+
+	// we need to wait a little bit since the files get deleted on a different
+	// goroutine.
+	<-time.After(time.Millisecond * 10)
+
+	// now we should only have 2 files left - the primary and one backup
+	fileCount(dir, 1, t)
+	fileCount(dir2, 1, t)
+}
+
 func TestMaxAge(t *testing.T) {
 	currentTime = fakeTime
 	megabyte = 1
@@ -475,6 +604,49 @@ func TestOldLogFiles(t *testing.T) {
 	isNil(err, t)
 
 	l := &Logger{Filename: filename}
+	files, err := l.oldLogFiles()
+	isNil(err, t)
+	equals(2, len(files), t)
+
+	// should be sorted by newest file first, which would be t2
+	equals(t2, files[0].timestamp, t)
+	equals(t1, files[1].timestamp, t)
+}
+
+func TestOldLogFilesWithBackupDir(t *testing.T) {
+	currentTime = fakeTime
+	megabyte = 1
+
+	dir := makeTempDir("TestOldLogFiles", t)
+	defer os.RemoveAll(dir)
+
+	dir2 := makeTempDir("TestOldLogFiles2", t)
+	defer os.RemoveAll(dir2)
+
+	filename := logFile(dir)
+	data := []byte("data")
+	err := ioutil.WriteFile(filename, data, 07)
+	isNil(err, t)
+
+	// This gives us a time with the same precision as the time we get from the
+	// timestamp in the name.
+	t1, err := time.Parse(backupTimeFormat, fakeTime().UTC().Format(backupTimeFormat))
+	isNil(err, t)
+
+	backup := backupFile(dir2)
+	err = ioutil.WriteFile(backup, data, 07)
+	isNil(err, t)
+
+	newFakeTime()
+
+	t2, err := time.Parse(backupTimeFormat, fakeTime().UTC().Format(backupTimeFormat))
+	isNil(err, t)
+
+	backup2 := backupFile(dir2)
+	err = ioutil.WriteFile(backup2, data, 07)
+	isNil(err, t)
+
+	l := &Logger{Filename: filename, BackupDirectory: dir2}
 	files, err := l.oldLogFiles()
 	isNil(err, t)
 	equals(2, len(files), t)
